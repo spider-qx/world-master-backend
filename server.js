@@ -5,57 +5,135 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Shared multiplayer game world state
-let gameWorld = {
-    clubs: {
-        "apex_fc": {
-            name: "Apex FC",
-            budget: 35000000,
-            matchday: 1,
-            squad: [
-                { name: "Marcus Vance", pos: "ST", age: 25, ovr: 85, wage: 55000, value: 14000000 }
-            ]
+let database = {
+    universes: [
+        {
+            id: "default_world",
+            name: "Premier Elite Universe",
+            admin: "Spider23qX",
+            laws: "1. Financial Fair Play active.\n2. Transfer caps enforced by Aya.",
+            activeTournament: "World Master League Cup",
+            newsletters: ["📰 [FA Gazette]: Welcome to the Premier Elite Universe."],
+            transferMarket: [
+                { id: 101, name: "Mateo Fernandez", pos: "RW", age: 21, ovr: 83, price: 16000000 },
+                { id: 102, name: "Pep Lijnders", pos: "Head Coach", age: 43, ovr: 85, price: 5000000 }
+            ],
+            clubs: {
+                "apex_fc": {
+                    name: "Apex FC",
+                    owner: "Spider23qX",
+                    budget: 35000000,
+                    stadiumCap: 40000,
+                    matchday: 1,
+                    coach: { name: "Unassigned", rating: 0 },
+                    squad: [
+                        { name: "Marcus Vance", pos: "ST", age: 25, ovr: 85, wage: 55000 }
+                    ]
+                }
+            }
         }
-    },
-    transferMarket: [
-        { id: 1, name: "Mateo Fernandez", pos: "RW", age: 21, ovr: 83, price: 16000000 },
-        { id: 2, name: "Jordan Henderson-Smith", pos: "CM", age: 26, ovr: 79, price: 9000000 },
-        { id: 3, name: "Viktor Gyökeres Profile", pos: "ST", age: 27, ovr: 86, price: 24000000 }
     ]
 };
 
-// API: Get club and market state
-app.get('/api/club/:id', (req, res) => {
-    const clubId = req.params.id;
-    const club = gameWorld.clubs[clubId] || gameWorld.clubs["apex_fc"];
-    res.json({ club, transferMarket: gameWorld.transferMarket });
+app.get('/api/universes', (req, res) => {
+    res.json(database.universes);
 });
 
-// API: Handle shared transfers between players
-app.post('/api/club/:id/transfer', (req, res) => {
-    const clubId = req.params.id;
-    const { playerId } = req.body;
-    
-    let club = gameWorld.clubs[clubId] || gameWorld.clubs["apex_fc"];
-    let playerIndex = gameWorld.transferMarket.findIndex(p => p.id === playerId);
+app.post('/api/universes', (req, res) => {
+    const { name, admin } = req.body;
+    const newId = "world_" + Date.now();
 
-    if (playerIndex === -1) {
-        return res.status(400).json({ error: "Player already signed by another manager!" });
+    const newWorld = {
+        id: newId,
+        name,
+        admin,
+        laws: "1. FFP Active.\n2. Fair Bidding enforced by Aya.",
+        activeTournament: "Inaugural Universe Cup",
+        newsletters: [`📰 [FA Gazette]: Universe '${name}' created by ${admin}.`],
+        transferMarket: [
+            { id: Date.now() + 1, name: "Mikel Arteta Jr", pos: "Head Coach", age: 44, ovr: 88, price: 7000000 }
+        ],
+        clubs: {}
+    };
+
+    database.universes.push(newWorld);
+    res.json({ success: true, world: newWorld });
+});
+
+app.post('/api/universes/:worldId/join', (req, res) => {
+    const { worldId } = req.params;
+    const { managerName, clubName } = req.body;
+
+    let world = database.universes.find(w => w.id === worldId);
+    if (!world) return res.status(404).json({ error: "Universe not found" });
+
+    let clubKey = clubName.toLowerCase().replace(/\s+/g, '_');
+
+    if (!world.clubs[clubKey]) {
+        world.clubs[clubKey] = {
+            name: clubName,
+            owner: managerName,
+            budget: 35000000,
+            stadiumCap: 40000,
+            matchday: 1,
+            coach: { name: "Unassigned", rating: 0 },
+            squad: [
+                { name: "Starter Striker", pos: "ST", age: 24, ovr: 78, wage: 20000 }
+            ]
+        };
     }
-    
-    let player = gameWorld.transferMarket[playerIndex];
 
-    if (club.budget < player.price) {
-        return res.status(400).json({ error: "Insufficient club funds!" });
+    res.json({ success: true, world, clubKey });
+});
+
+app.post('/api/universes/:worldId/transfer', (req, res) => {
+    const { worldId } = req.params;
+    const { clubKey, itemId } = req.body;
+
+    let world = database.universes.find(w => w.id === worldId);
+    if (!world) return res.status(404).json({ error: "Universe not found" });
+
+    let club = world.clubs[clubKey];
+    let itemIndex = world.transferMarket.findIndex(i => i.id === itemId);
+
+    if (itemIndex === -1) return res.status(400).json({ error: "Aya: Player or Coach already signed by another club!" });
+
+    let item = world.transferMarket[itemIndex];
+
+    if (club.budget < item.price) {
+        return res.status(400).json({ error: "Aya: Transfer denied. Insufficient club funds." });
     }
 
-    // Process transaction globally
-    club.budget -= player.price;
-    club.squad.push({ ...player, cond: "100%", wage: Math.round(player.price * 0.0025) });
-    gameWorld.transferMarket.splice(playerIndex, 1);
+    club.budget -= item.price;
+    world.transferMarket.splice(itemIndex, 1);
 
-    res.json({ success: true, club, transferMarket: gameWorld.transferMarket });
+    if (item.pos === "Head Coach") {
+        club.coach = { name: item.name, rating: item.ovr };
+    } else {
+        club.squad.push({ name: item.name, pos: item.pos, age: item.age, ovr: item.ovr, wage: Math.round(item.price * 0.002) });
+    }
+
+    res.json({ success: true, world, club });
+});
+
+app.post('/api/universes/:worldId/admin', (req, res) => {
+    const { worldId } = req.params;
+    const { action, data } = req.body;
+
+    let world = database.universes.find(w => w.id === worldId);
+    if (!world) return res.status(404).json({ error: "Universe not found" });
+
+    if (action === 'inject') {
+        world.transferMarket.push({ id: Date.now(), ...data });
+    } else if (action === 'tournament') {
+        world.activeTournament = data.tournamentName;
+        world.newsletters.unshift(`📰 [Tournament]: Admin launched '${data.tournamentName}'!`);
+    } else if (action === 'newsletter') {
+        world.newsletters.unshift(`📰 [Admin Dispatch]: ${data.text}`);
+    }
+
+    res.json({ success: true, world });
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Multiplayer server running on port ${PORT}`));
+app.listen(PORT, () => console.log(`World Master Backend Server running on port ${PORT}`));
