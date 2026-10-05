@@ -6,6 +6,7 @@ app.use(cors());
 app.use(express.json());
 
 let database = {
+    users: [], // Stores user accounts: { username, password }
     universes: [
         {
             id: "default_world",
@@ -25,12 +26,31 @@ let database = {
     ]
 };
 
-// Get all universes
+// --- USER AUTHENTICATION ROUTES ---
+app.post('/api/auth/register', (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: "Username and password required." });
+    
+    let existing = database.users.find(u => u.username.toLowerCase() === username.toLowerCase());
+    if (existing) return res.status(400).json({ error: "Username already taken." });
+
+    database.users.push({ username, password });
+    res.json({ success: true, message: "Account created successfully!" });
+});
+
+app.post('/api/auth/login', (req, res) => {
+    const { username, password } = req.body;
+    let user = database.users.find(u => u.username.toLowerCase() === username.toLowerCase() && u.password === password);
+    if (!user) return res.status(400).json({ error: "Invalid username or password." });
+
+    res.json({ success: true, username: user.username });
+});
+
+// --- UNIVERSE & CLUB ROUTES ---
 app.get('/api/universes', (req, res) => {
     res.json(database.universes);
 });
 
-// Create a new Universe
 app.post('/api/universes', (req, res) => {
     const { name, admin } = req.body;
     const newId = "world_" + Date.now();
@@ -54,37 +74,25 @@ app.post('/api/universes', (req, res) => {
     res.json({ success: true, world: newWorld });
 });
 
-// Delete a Universe (Admin Only)
-app.delete('/api/universes/:worldId', (req, res) => {
-    const { worldId } = req.params;
-    const { adminName } = req.body;
-
-    let index = database.universes.findIndex(w => w.id === worldId);
-    if (index === -1) return res.status(404).json({ error: "Universe not found" });
-
-    if (database.universes[index].admin.toLowerCase() !== adminName.toLowerCase()) {
-        return res.status(403).json({ error: "Only the designated admin can delete this world." });
-    }
-
-    database.universes.splice(index, 1);
-    res.json({ success: true });
-});
-
-// Join or Resume Club Session (Persistent)
+// Join or Load Club via User Account
 app.post('/api/universes/:worldId/join', (req, res) => {
     const { worldId } = req.params;
-    const { managerName, clubName } = req.body;
+    const { username, clubName } = req.body;
 
     let world = database.universes.find(w => w.id === worldId);
     if (!world) return res.status(404).json({ error: "Universe not found" });
 
     let clubKey = clubName.toLowerCase().replace(/\s+/g, '_');
 
-    // If club doesn't exist, create it. If it exists, it logs them right back in with their stats intact!
+    // Check if club is already owned by someone else
+    if (world.clubs[clubKey] && world.clubs[clubKey].owner !== username) {
+        return res.status(400).json({ error: "This club name is already owned by another manager!" });
+    }
+
     if (!world.clubs[clubKey]) {
         world.clubs[clubKey] = {
             name: clubName,
-            owner: managerName,
+            owner: username,
             budget: 35000000,
             stadiumCap: 40000,
             points: 0,
@@ -104,7 +112,7 @@ app.post('/api/universes/:worldId/join', (req, res) => {
     res.json({ success: true, world, clubKey });
 });
 
-// Universal Automatic Matchday Simulation (Simulates matches for all active clubs)
+// --- ADVANCED MATCH SIMULATOR ENGINE ---
 app.post('/api/universes/:worldId/simulate', (req, res) => {
     const { worldId } = req.params;
     let world = database.universes.find(w => w.id === worldId);
@@ -112,70 +120,63 @@ app.post('/api/universes/:worldId/simulate', (req, res) => {
 
     let clubKeys = Object.keys(world.clubs);
     if (clubKeys.length < 2) {
-        return res.status(400).json({ error: "Need at least 2 clubs in the universe to simulate matchday fixtures!" });
+        return res.status(400).json({ error: "Need at least 2 clubs in the universe to simulate matchdays!" });
     }
 
-    // Pair up clubs for this matchday
-    let resultsSummary = `--- Matchday ${world.matchday} Results ---\n`;
-    
+    let matchDaySummary = `=== MATCHDAY ${world.matchday} SIMULATION ===\n`;
+
+    // Simulate fixtures between paired clubs
     for (let i = 0; i < clubKeys.length; i += 2) {
         if (i + 1 < clubKeys.length) {
             let homeKey = clubKeys[i];
             let awayKey = clubKeys[i+1];
-            let homeClub = world.clubs[homeKey];
-            let awayClub = world.clubs[awayKey];
+            let home = world.clubs[homeKey];
+            let away = world.clubs[awayKey];
 
-            // Calculate goals based on squad strength + coach rating
-            let homeStrength = homeClub.squad.reduce((acc, p) => acc + p.ovr, 0) / (homeClub.squad.length || 1) + homeClub.coach.rating;
-            let awayStrength = awayClub.squad.reduce((acc, p) => acc + p.ovr, 0) / (awayClub.squad.length || 1) + awayClub.coach.rating;
+            // Engine calculation using squad rating + coach impact
+            let homePower = home.squad.reduce((sum, p) => sum + p.ovr, 0) / (home.squad.length || 1) + home.coach.rating;
+            let awayPower = away.squad.reduce((sum, p) => sum + p.ovr, 0) / (away.squad.length || 1) + away.coach.rating;
 
-            let homeGoals = Math.floor(Math.random() * (homeStrength > awayStrength ? 3 : 2));
-            let awayGoals = Math.floor(Math.random() * (awayStrength > homeStrength ? 3 : 2));
+            let homeGoals = Math.max(0, Math.floor((homePower / 35) + (Math.random() * 2) - 0.8));
+            let awayGoals = Math.max(0, Math.floor((awayPower / 35) + (Math.random() * 2) - 0.8));
 
-            // Update table stats
-            homeClub.played++;
-            awayClub.played++;
-            homeClub.gf += homeGoals;
-            homeClub.ga += awayGoals;
-            awayClub.gf += awayGoals;
-            awayClub.ga += homeGoals;
+            // Adjust table stats
+            home.played++; away.played++;
+            home.gf += homeGoals; home.ga += awayGoals;
+            away.gf += awayGoals; away.ga += homeGoals;
 
             if (homeGoals > awayGoals) {
-                homeClub.won++; homeClub.points += 3;
-                awayClub.lost++;
+                home.won++; home.points += 3;
+                away.lost++;
             } else if (homeGoals < awayGoals) {
-                awayClub.won++; awayClub.points += 3;
-                homeClub.lost++;
+                away.won++; away.points += 3;
+                home.lost++;
             } else {
-                homeClub.drawn++; homeClub.points += 1;
-                awayClub.drawn++; awayClub.points += 1;
+                home.drawn++; home.points += 1;
+                away.drawn++; away.points += 1;
             }
 
-            resultsSummary += `${homeClub.name} ${homeGoals} - ${awayGoals} ${awayClub.name}\n`;
+            matchDaySummary += `⚽ ${home.name} ${homeGoals} - ${awayGoals} ${away.name}\n`;
         }
     }
 
-    world.matchesLog.unshift(resultsSummary);
+    world.matchesLog.unshift(matchDaySummary);
     world.matchday++;
 
     res.json({ success: true, world });
 });
 
-// Transfer execution
+// Transfer & Admin actions
 app.post('/api/universes/:worldId/transfer', (req, res) => {
     const { worldId } = req.params;
     const { clubKey, itemId } = req.body;
-
     let world = database.universes.find(w => w.id === worldId);
-    if (!world) return res.status(404).json({ error: "Universe not found" });
-
     let club = world.clubs[clubKey];
     let itemIndex = world.transferMarket.findIndex(i => i.id === itemId);
 
-    if (itemIndex === -1) return res.status(400).json({ error: "Aya: Item already signed!" });
+    if (itemIndex === -1) return res.status(400).json({ error: "Item already signed." });
     let item = world.transferMarket[itemIndex];
-
-    if (club.budget < item.price) return res.status(400).json({ error: "Aya: Insufficient funds." });
+    if (club.budget < item.price) return res.status(400).json({ error: "Insufficient funds." });
 
     club.budget -= item.price;
     world.transferMarket.splice(itemIndex, 1);
@@ -185,28 +186,19 @@ app.post('/api/universes/:worldId/transfer', (req, res) => {
     } else {
         club.squad.push({ name: item.name, pos: item.pos, age: item.age, ovr: item.ovr, wage: Math.round(item.price * 0.002) });
     }
-
     res.json({ success: true, world, club });
 });
 
-// Admin Actions
-app.post('/api/universes/:worldId/admin', (req, res) => {
+app.delete('/api/universes/:worldId', (req, res) => {
     const { worldId } = req.params;
-    const { action, data } = req.body;
-
-    let world = database.universes.find(w => w.id === worldId);
-    if (!world) return res.status(404).json({ error: "Universe not found" });
-
-    if (action === 'inject') {
-        world.transferMarket.push({ id: Date.now(), ...data });
-    } else if (action === 'tournament') {
-        world.activeTournament = data.tournamentName;
-        world.newsletters.unshift(`📰 [Tournament]: Admin launched '${data.tournamentName}'!`);
-    } else if (action === 'newsletter') {
-        world.newsletters.unshift(`📰 [Admin Dispatch]: ${data.text}`);
+    const { adminName } = req.body;
+    let index = database.universes.findIndex(w => w.id === worldId);
+    if (index === -1) return res.status(404).json({ error: "Universe not found" });
+    if (database.universes[index].admin.toLowerCase() !== adminName.toLowerCase()) {
+        return res.status(403).json({ error: "Unauthorized admin." });
     }
-
-    res.json({ success: true, world });
+    database.universes.splice(index, 1);
+    res.json({ success: true });
 });
 
 const PORT = process.env.PORT || 3000;
