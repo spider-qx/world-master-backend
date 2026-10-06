@@ -7,21 +7,7 @@ app.use(express.json());
 
 let database = {
     users: [],
-    universes: [
-        {
-            id: "default_world",
-            name: "Global PvP Championship",
-            admin: "Spider23qX",
-            matchday: 1,
-            fixtures: [], // Stores structured round-robin matchdays
-            transferMarket: [
-                { id: 101, name: "Kylian Mbappe Jr", pos: "ST", age: 22, ovr: 89, price: 45000000 },
-                { id: 102, name: "Jürgen Klopp", pos: "Head Coach", age: 58, ovr: 91, price: 12000000 }
-            ],
-            clubs: {},
-            matchesLog: []
-        }
-    ]
+    universes: []
 };
 
 // --- AUTHENTICATION ---
@@ -46,16 +32,16 @@ app.post('/api/auth/login', (req, res) => {
 app.get('/api/universes', (req, res) => res.json(database.universes));
 
 app.post('/api/universes', (req, res) => {
-    const { name, admin } = req.body;
+    const { name, creator } = req.body;
     const newWorld = {
         id: "world_" + Date.now(),
         name,
-        admin,
+        admin: null, // No initial admin until someone applies & wins/claims
+        adminCandidate: creator,
+        adminCandidateTimer: Date.now() + (2 * 60 * 1000), // 2 minutes from creation
         matchday: 1,
         fixtures: [],
-        transferMarket: [
-            { id: Date.now(), name: "Zinedine Zidane", pos: "Head Coach", age: 53, ovr: 92, price: 15000000 }
-        ],
+        transferMarket: [],
         clubs: {},
         matchesLog: []
     };
@@ -63,7 +49,41 @@ app.post('/api/universes', (req, res) => {
     res.json({ success: true, world: newWorld });
 });
 
-// --- JOIN / CREATE CLUB & GENERATE FIXTURES ---
+// Apply / Claim Admin Role after 2 minutes or if uncontested
+app.post('/api/universes/:worldId/claim-admin', (req, res) => {
+    const { worldId } = req.params;
+    const { username } = req.body;
+    let world = database.universes.find(w => w.id === worldId);
+    if (!world) return res.status(404).json({ error: "League not found." });
+
+    if (world.admin) {
+        return res.status(400).json({ error: "This league already has an active admin!" });
+    }
+
+    let timeLeft = world.adminCandidateTimer - Date.now();
+    if (timeLeft > 0 && world.adminCandidate !== username) {
+        return res.status(400).json({ error: `Another user applied first. Please wait ${Math.ceil(timeLeft / 1000)} seconds to contest or claim.` });
+    }
+
+    // Assign admin role
+    world.admin = username;
+    res.json({ success: true, world });
+});
+
+// Contest Admin Position
+app.post('/api/universes/:worldId/contest-admin', (req, res) => {
+    const { worldId } = req.params;
+    const { username } = req.body;
+    let world = database.universes.find(w => w.id === worldId);
+    if (!world) return res.status(404).json({ error: "League not found." });
+    if (world.admin) return res.status(400).json({ error: "Admin role is already locked." });
+
+    world.adminCandidate = username;
+    world.adminCandidateTimer = Date.now() + (2 * 60 * 1000); // Reset timer 2 mins for new contender
+    res.json({ success: true, world, message: "Successfully contested admin position! Timer reset." });
+});
+
+// --- JOIN LEAGUE / CLUB CREATION ---
 app.post('/api/universes/:worldId/join', (req, res) => {
     const { worldId } = req.params;
     const { username, clubName } = req.body;
@@ -73,7 +93,7 @@ app.post('/api/universes/:worldId/join', (req, res) => {
 
     let clubKey = clubName.toLowerCase().replace(/\s+/g, '_');
     if (world.clubs[clubKey] && world.clubs[clubKey].owner !== username) {
-        return res.status(400).json({ error: "Club name already claimed by another manager!" });
+        return res.status(400).json({ error: "Club name already claimed!" });
     }
 
     if (!world.clubs[clubKey]) {
@@ -84,25 +104,19 @@ app.post('/api/universes/:worldId/join', (req, res) => {
             points: 0, played: 0, won: 0, drawn: 0, lost: 0, gf: 0, ga: 0,
             coach: { name: "Free Agent Coach", rating: 70 },
             squad: [
-                { name: "Star Forward", pos: "ST", age: 23, ovr: 80, wage: 30000 },
-                { name: "Solid Midfielder", pos: "CM", age: 25, ovr: 78, wage: 25000 }
+                { name: "Star Striker", pos: "ST", age: 23, ovr: 80, wage: 30000 }
             ]
         };
-
-        // Re-generate tournament fixtures automatically when new PvP managers join
         generateFixtures(world);
     }
 
     res.json({ success: true, world, clubKey });
 });
 
-// Helper: Round-Robin Tournament Fixture Generator
 function generateFixtures(world) {
     let keys = Object.keys(world.clubs);
     world.fixtures = [];
     if (keys.length < 2) return;
-
-    // If odd number of clubs, add a dummy bye
     let list = [...keys];
     if (list.length % 2 !== 0) list.push("BYE");
 
@@ -119,62 +133,73 @@ function generateFixtures(world) {
             }
         }
         world.fixtures.push({ matchday: round + 1, matches: matchdayFixtures });
-        // Rotate array elements
         list.splice(1, 0, list.pop());
     }
 }
 
-// --- PVP MATCHDAY SIMULATION ENGINE ---
+// --- ADMIN MARKET INJECTOR (PLAYERS & COACHES) ---
+app.post('/api/universes/:worldId/admin/add-market-item', (req, res) => {
+    const { worldId } = req.params;
+    const { username, itemType, name, pos, age, ovr, price } = req.body;
+
+    let world = database.universes.find(w => w.id === worldId);
+    if (!world) return res.status(404).json({ error: "League not found." });
+    if (world.admin !== username) return res.status(403).json({ error: "Unauthorized: Admin access required." });
+
+    let newItem = {
+        id: Date.now(),
+        type: itemType, // 'player' or 'coach'
+        name,
+        pos: itemType === 'coach' ? 'Head Coach' : pos,
+        age: Number(age),
+        ovr: Number(ovr),
+        price: Number(price)
+    };
+
+    world.transferMarket.push(newItem);
+    res.json({ success: true, world });
+});
+
+// Simulate Matchday
 app.post('/api/universes/:worldId/simulate-matchday', (req, res) => {
     const { worldId } = req.params;
     let world = database.universes.find(w => w.id === worldId);
     if (!world) return res.status(404).json({ error: "Universe not found" });
 
     let currentRoundObj = world.fixtures.find(f => f.matchday === world.matchday);
-    if (!currentRoundObj) {
-        return res.status(400).json({ error: "All tournament matchdays have been completed!" });
-    }
+    if (!currentRoundObj) return res.status(400).json({ error: "Tournament completed!" });
 
-    let roundSummary = `=== TOURNAMENT MATCHDAY ${world.matchday} RESULTS ===\n`;
-
+    let roundSummary = `=== MATCHDAY ${world.matchday} RESULTS ===\n`;
     currentRoundObj.matches.forEach(match => {
         if (match.played) return;
-
         let homeClub = world.clubs[match.home];
         let awayClub = world.clubs[match.away];
 
-        // PvP Calculation based on squad overall ratings and coaches
-        let homePower = homeClub.squad.reduce((acc, p) => acc + p.ovr, 0) / homeClub.squad.length + homeClub.coach.rating;
-        let awayPower = awayClub.squad.reduce((acc, p) => acc + p.ovr, 0) / awayClub.squad.length + awayClub.coach.rating;
+        let homePower = homeClub.squad.reduce((a, p) => a + p.ovr, 0) / homeClub.squad.length + homeClub.coach.rating;
+        let awayPower = awayClub.squad.reduce((a, p) => a + p.ovr, 0) / awayClub.squad.length + awayClub.coach.rating;
 
-        let homeGoals = Math.max(0, Math.floor((homePower / 40) + (Math.random() * 2.2) - 1));
-        let awayGoals = Math.max(0, Math.floor((awayPower / 40) + (Math.random() * 2.2) - 1));
+        let homeGoals = Math.max(0, Math.floor((homePower / 40) + (Math.random() * 2) - 1));
+        let awayGoals = Math.max(0, Math.floor((awayPower / 40) + (Math.random() * 2) - 1));
 
-        // Update league standings
         homeClub.played++; awayClub.played++;
         homeClub.gf += homeGoals; homeClub.ga += awayGoals;
         awayClub.gf += awayGoals; awayClub.ga += homeGoals;
 
-        if (homeGoals > awayGoals) {
-            homeClub.won++; homeClub.points += 3; awayClub.lost++;
-        } else if (homeGoals < awayGoals) {
-            awayClub.won++; awayClub.points += 3; homeClub.lost++;
-        } else {
-            homeClub.drawn++; homeClub.points += 1; awayClub.drawn++; awayClub.points += 1;
-        }
+        if (homeGoals > awayGoals) { homeClub.won++; homeClub.points += 3; awayClub.lost++; }
+        else if (homeGoals < awayGoals) { awayClub.won++; awayClub.points += 3; homeClub.lost++; }
+        else { homeClub.drawn++; homeClub.points += 1; awayClub.drawn++; awayClub.points += 1; }
 
         match.played = true;
         match.score = `${homeGoals} - ${awayGoals}`;
-        roundSummary += `⚔️️ [PvP] ${homeClub.name} (${homeGoals}) vs (${awayGoals}) ${awayClub.name}\n`;
+        roundSummary += `⚔ ${homeClub.name} (${homeGoals}) - (${awayGoals}) ${awayClub.name}\n`;
     });
 
     world.matchesLog.unshift(roundSummary);
     world.matchday++;
-
     res.json({ success: true, world });
 });
 
-// Transfer Market & Admin Deletion
+// Transfer Buy
 app.post('/api/universes/:worldId/transfer', (req, res) => {
     const { worldId } = req.params;
     let world = database.universes.find(w => w.id === worldId);
@@ -184,23 +209,19 @@ app.post('/api/universes/:worldId/transfer', (req, res) => {
 
     if (index === -1) return res.status(400).json({ error: "Item unavailable." });
     let item = world.transferMarket[index];
-    if (club.budget < item.price) return res.status(400).json({ error: "Not enough budget." });
+    if (club.budget < item.price) return res.status(400).json({ error: "Insufficient funds." });
 
     club.budget -= item.price;
     world.transferMarket.splice(index, 1);
 
-    if (item.pos === "Head Coach") club.coach = { name: item.name, rating: item.ovr };
-    else club.squad.push({ name: item.name, pos: item.pos, age: item.age, ovr: item.ovr, wage: 20000 });
+    if (item.type === 'coach' || item.pos === 'Head Coach') {
+        club.coach = { name: item.name, rating: item.ovr };
+    } else {
+        club.squad.push({ name: item.name, pos: item.pos, age: item.age, ovr: item.ovr, wage: 20000 });
+    }
 
     res.json({ success: true, world, club });
 });
 
-app.delete('/api/universes/:worldId', (req, res) => {
-    const { worldId } = req.params;
-    let index = database.universes.findIndex(w => w.id === worldId);
-    if (index !== -1) database.universes.splice(index, 1);
-    res.json({ success: true });
-});
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Backend online on port ${PORT}`));
+app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
